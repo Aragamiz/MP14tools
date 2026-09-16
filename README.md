@@ -160,6 +160,14 @@ build.cmd -Release
 > （`.\build.ps1` → `build\obj\debug\mp14tools.exe`），全程不需要管理员权限，
 > 除上面第 1、2 步外没有额外的手工步骤。
 
+#### 4. 自动发布（CI）
+
+仓库带 `.github/workflows/release.yml`：推 `v*` 标签时在 GitHub 的 Windows runner 上按上面同样的
+步骤构建，并校验「`Cargo.toml` 版本 = 标签 = 内嵌 `FileVersion`」，三者不一致就直接失败（这样不会
+因为 runner 上缺 windres 而发出去一个没有图标、没有版本属性的 exe）。通过后自动创建 Release，附上
+`mp14tools.exe`，发布说明取自 `docs/releases/<标签>.md`（没有该文件时用 GitHub 自动生成的说明）。
+已经推过的标签可以在 Actions 页面用 **Run workflow** 补发，把标签名填进输入框即可。
+
 ### ⚠️ 已知限制
 
 - OEM 热键前缀默认按参考机型提供，其它机型需要在 `config.json` 里改成自己的前缀；
@@ -345,6 +353,15 @@ Output: `build\obj\debug\mp14tools.exe` or `build\obj\release\mp14tools.exe`.
 > ✅ **Verified**: the debug build has been run through from scratch on another Windows x64 machine
 > (`.\build.ps1` → `build\obj\debug\mp14tools.exe`), with no admin rights and no manual steps
 > beyond steps 1 and 2 above.
+
+#### 4. Automatic releases (CI)
+
+`.github/workflows/release.yml` builds on a GitHub Windows runner with the same steps as above whenever
+a `v*` tag is pushed, and refuses to publish unless the manifest version, the tag and the embedded
+`FileVersion` all agree — that is what keeps a runner without windres from shipping an executable with
+no icon and no version properties. It then creates the release with `mp14tools.exe` attached, using
+`docs/releases/<tag>.md` as the body (falling back to GitHub's generated notes). For a tag that was
+pushed earlier, run the workflow manually and pass the tag.
 
 ### ⚠️ Known limitations
 

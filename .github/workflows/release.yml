@@ -1,0 +1,151 @@
+# Builds the release binary on a GitHub runner and publishes it, so a release no
+# longer depends on whichever toolchain happens to be installed on a local
+# machine.
+#
+# The build is exactly the one README describes - the GNU toolchain plus the
+# project-local dlltool/as pair and windres. The last two cannot come from the
+# checkout: `build\` is gitignored, and `build.rs` only *warns* when windres is
+# missing, which would silently ship an executable without its icon and version
+# block. So the runner installs them the documented way, through
+# tools\install-mingw.ps1, and then verifies what it is about to upload.
+#
+# Triggers:
+#   * pushing a `v*` tag     - the normal path
+#   * "Run workflow"         - for a tag that was pushed before this workflow
+#                              existed; pass the tag in the input
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build and publish (for example v0.2.9)
+        required: true
+        type: string
+
+# gh release create needs to write releases; nothing else is touched.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    env:
+      # build.ps1 prepends the GNU rustlib directories, but cargo/rustc come from
+      # the rustup shims, so the toolchain has to be selected here.
+      RUSTUP_TOOLCHAIN: stable-x86_64-pc-windows-gnu
+    steps:
+      - name: Checkout the tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Agree on the version
+        id: version
+        shell: pwsh
+        run: |
+          $tag = '${{ inputs.tag || github.ref_name }}'
+          $version = $tag -replace '^v', ''
+
+          # The tag is the release name; the manifest is what the version block
+          # of the executable is filled from. Letting them disagree would ship a
+          # binary whose properties do not match the release it is attached to.
+          $manifest = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"$').Matches[0].Groups[1].Value.Trim()
+          if ($manifest -ne $version) {
+              throw "Cargo.toml says $manifest, the tag says $version"
+          }
+
+          Write-Host "tag $tag, version $version"
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Install the GNU Rust toolchain
+        shell: pwsh
+        run: rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
+
+      - name: Cache the MinGW-w64 toolchain
+        uses: actions/cache@v4
+        with:
+          path: build/toolchain
+          # Tied to the installer: a changed installer may want a different
+          # MinGW-w64, and then reusing the old one would be wrong.
+          key: winlibs-mingw64-${{ runner.os }}-${{ hashFiles('tools/install-mingw.ps1') }}
+
+      - name: Install windres and the dlltool/as pair
+        shell: pwsh
+        # No-ops when the cache above was restored.
+        run: .\tools\install-mingw.ps1
+
+      - name: Build the release binary
+        shell: pwsh
+        run: |
+          $output = & .\build.ps1 -Release *>&1 | Out-String
+          $code = $LASTEXITCODE
+          $output | Set-Content -Path build\ci-build.log -Encoding utf8
+          Write-Host $output
+
+          if ($code -ne 0) { throw "build.ps1 exited with $code" }
+
+          # A missing or failing windres is only a warning in build.rs, and that
+          # is the one warning that must not reach a release.
+          if ($output -match 'windres not found|windres failed|could not run windres') {
+              throw 'the resource compiler did not run; the icon and version block would be missing'
+          }
+
+      - name: Check the binary that is about to ship
+        shell: pwsh
+        run: |
+          $exe = 'build\obj\release\mp14tools.exe'
+          $info = (Get-Item $exe).VersionInfo
+          $expected = '${{ steps.version.outputs.version }}.0'
+          # An empty string when the resource block is missing, instead of a
+          # confusing "cannot call a method on a null-valued expression".
+          $fileVersion = "$($info.FileVersion)".Trim()
+
+          if ($fileVersion -ne $expected) {
+              throw "$exe carries FileVersion '$fileVersion', expected $expected"
+          }
+
+          $size = (Get-Item $exe).Length
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash
+          Write-Host "$exe : FileVersion $fileVersion, $size bytes, SHA256 $hash"
+
+          # Same figures the release body quotes, straight from the binary that
+          # is uploaded.
+          @(
+              '### release asset'
+              ''
+              "- ``mp14tools.exe`` - $([math]::Round($size / 1MB, 2)) MB"
+              "- SHA256: ``$hash``"
+              "- FileVersion: ``$fileVersion``"
+          ) >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Keep the build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build/ci-build.log
+          if-no-files-found: ignore
+
+      - name: Publish the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = '${{ steps.version.outputs.tag }}'
+          $asset = 'build\obj\release\mp14tools.exe'
+          $notes = "docs/releases/$tag.md"
+
+          if (gh release view $tag 2>$null) {
+              # A release for this tag already exists - replace its asset instead
+              # of failing the run.
+              gh release upload $tag $asset --clobber
+              return
+          }
+
+          $arguments = @('release', 'create', $tag, '--title', "MP14Tools ${{ steps.version.outputs.version }}", '--verify-tag', $asset)
+          if (Test-Path $notes) { $arguments += @('--notes-file', $notes) } else { $arguments += '--generate-notes' }
+          gh @arguments
