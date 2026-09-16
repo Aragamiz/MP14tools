@@ -5,6 +5,9 @@
 一个单进程、低占用的 Windows 小工具：把笔记本触摸板的重按与厂商（OEM）热键变成自定义动作，
 并在电池供电时自动降低刷新率、检查 HDR。
 
+> 📥 **下载**：[最新版本 Releases](https://github.com/Aragamiz/MP14tools/releases/latest)
+> — 单文件 `mp14tools.exe`，免安装，无需管理员权限。
+
 ---
 
 ## 中文说明
@@ -164,6 +167,9 @@ build.cmd -Release
 MP14Tools is a small single-process Windows utility that turns the touchpad deep press and the
 vendor (OEM) hotkeys of a laptop into configurable actions, and that lowers the refresh rate and
 checks HDR while running on battery.
+
+> 📥 **Download**: [latest release](https://github.com/Aragamiz/MP14tools/releases/latest)
+> - a single `mp14tools.exe`, no installer and no admin rights.
 
 ### Features
 
