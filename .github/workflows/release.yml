@@ -38,7 +38,7 @@ jobs:
       RUSTUP_TOOLCHAIN: stable-x86_64-pc-windows-gnu
     steps:
       - name: Checkout the tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ inputs.tag || github.ref }}
 
@@ -63,10 +63,36 @@ jobs:
 
       - name: Install the GNU Rust toolchain
         shell: pwsh
-        run: rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
+        run: |
+          rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
+
+          # `--profile minimal` is not enough to *link*: the crt objects the GNU
+          # target needs (crt2.o, crtbegin.o) and the import libraries
+          # (-lkernel32, -lmingw32, -lmingwex, -lmsvcrt) ship in this component.
+          # Without it the first build script dies with
+          #     ld: cannot find crt2.o: No such file or directory
+          #     ld: cannot find -lkernel32: No such file or directory
+          rustup component add rust-mingw --toolchain stable-x86_64-pc-windows-gnu
+
+      - name: Pin the GNU linker
+        shell: pwsh
+        # Runner images carry MinGW directories on PATH, and letting rustc pick
+        # one of those up breaks the link the same way tools\install-mingw.ps1
+        # warns about ("cannot find crt2.o"). So point rustc at rustup's own
+        # linker shim, next to which its crt objects and import libraries live.
+        run: |
+          $sysroot = (rustc --print sysroot).Trim()
+          $linker = Join-Path $sysroot 'lib\rustlib\x86_64-pc-windows-gnu\bin\self-contained\x86_64-w64-mingw32-gcc.exe'
+
+          if (-not (Test-Path $linker)) {
+              throw "no GNU linker at $linker - the rust-mingw component is missing"
+          }
+
+          Write-Host "linker: $linker"
+          "CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=$linker" >> $env:GITHUB_ENV
 
       - name: Cache the MinGW-w64 toolchain
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: build/toolchain
           # Tied to the installer: a changed installer may want a different
@@ -95,6 +121,7 @@ jobs:
           }
 
       - name: Check the binary that is about to ship
+        id: check
         shell: pwsh
         run: |
           $exe = 'build\obj\release\mp14tools.exe'
@@ -112,6 +139,10 @@ jobs:
           $hash = (Get-FileHash $exe -Algorithm SHA256).Hash
           Write-Host "$exe : FileVersion $fileVersion, $size bytes, SHA256 $hash"
 
+          "fileVersion=$fileVersion" >> $env:GITHUB_OUTPUT
+          "size=$size" >> $env:GITHUB_OUTPUT
+          "hash=$hash" >> $env:GITHUB_OUTPUT
+
           # Same figures the release body quotes, straight from the binary that
           # is uploaded.
           @(
@@ -124,7 +155,7 @@ jobs:
 
       - name: Keep the build log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: build-log
           path: build/ci-build.log
@@ -136,16 +167,34 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = '${{ steps.version.outputs.tag }}'
+          $version = '${{ steps.version.outputs.version }}'
           $asset = 'build\obj\release\mp14tools.exe'
+
+          # The body is the checked-in notes when the tag has them (see
+          # docs/releases), plus the facts of the binary that is actually
+          # attached - taken from the run instead of written by hand, so the
+          # numbers on the release page cannot go stale.
           $notes = "docs/releases/$tag.md"
+          $body = Join-Path $env:RUNNER_TEMP 'release-body.md'
+          if (Test-Path $notes) {
+              Copy-Item $notes $body
+          } else {
+              Set-Content -Path $body -Value "# MP14Tools $version" -Encoding utf8
+          }
+
+          Add-Content -Path $body -Value ''
+          Add-Content -Path $body -Value '### release asset'
+          Add-Content -Path $body -Value ''
+          Add-Content -Path $body -Value "- ``mp14tools.exe`` - ${{ steps.check.outputs.size }} bytes"
+          Add-Content -Path $body -Value "- SHA256: ``${{ steps.check.outputs.hash }}``"
+          Add-Content -Path $body -Value "- FileVersion: ``${{ steps.check.outputs.fileVersion }}``"
 
           if (gh release view $tag 2>$null) {
-              # A release for this tag already exists - replace its asset instead
-              # of failing the run.
+              # A release for this tag already exists - replace its asset and its
+              # body instead of failing the run.
               gh release upload $tag $asset --clobber
+              gh release edit $tag --notes-file $body
               return
           }
 
-          $arguments = @('release', 'create', $tag, '--title', "MP14Tools ${{ steps.version.outputs.version }}", '--verify-tag', $asset)
-          if (Test-Path $notes) { $arguments += @('--notes-file', $notes) } else { $arguments += '--generate-notes' }
-          gh @arguments
+          gh release create $tag --title "MP14Tools $version" --verify-tag --notes-file $body $asset
