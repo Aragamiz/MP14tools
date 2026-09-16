@@ -660,33 +660,6 @@ impl SettingsApp {
             }
         });
 
-        ui.add_space(10.0);
-        egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.label(egui::RichText::new("Smart Refresh Rate 配置（可选）").strong());
-            ui.label(
-                egui::RichText::new(
-                    "指向 SRR 的运行时目录（里面有 config.json 与 logs.txt）。填了它，就按 SRR 记录的每台显示器的性能/省电档位切换；留空则按当前分辨率自动挑选。",
-                )
-                .size(11.5)
-                .weak(),
-            );
-            ui.horizontal(|ui| {
-                changed |= ui
-                    .add(
-                        egui::TextEdit::singleline(&mut display.srr_folder)
-                            .desired_width(340.0)
-                            .hint_text(r"…\Smart-Refresh-Rate-main\SRR"),
-                    )
-                    .changed();
-                if ui.button("浏览…").clicked() {
-                    if let Some(folder) = pick_folder() {
-                        display.srr_folder = folder;
-                        changed = true;
-                    }
-                }
-            });
-        });
-
         if changed {
             self.working.display = display;
             // The policy thread reacts to the new switches without waiting for

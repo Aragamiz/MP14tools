@@ -89,8 +89,7 @@
     "external_refresh_rate": "60hz", // 外屏档位：highest（最高档）| 60hz
     "hdr_check": true,             // 只检测内屏 HDR
     "internal": true,              // 影响内屏
-    "external": true,              // 影响外屏
-    "srr_folder": ""               // 留空 = 按面板实际支持的档位自动决定
+    "external": true               // 影响外屏
   },
   "oem_keys": [
     {
@@ -263,8 +262,7 @@ refresh rate, and it checks the HDR state and prompts about it.
     "external_refresh_rate": "60hz", // external mode: highest | 60hz
     "hdr_check": true,             // checks the internal panel's HDR only
     "internal": true,              // affects the internal display
-    "external": true,              // affects the external displays
-    "srr_folder": ""               // empty = decided automatically from the modes the panel actually supports
+    "external": true               // affects the external displays
   },
   "oem_keys": [
     {

@@ -274,11 +274,6 @@ pub struct DisplayConfig {
     pub internal: bool,
     /// Externally connected displays take part.
     pub external: bool,
-    /// Optional runtime folder of the Smart-Refresh-Rate tool
-    /// (`...\SRR`, holding its `config.json`). When set, the per-monitor
-    /// performance/powersave modes recorded there are used instead of the
-    /// defaults derived from the current resolution.
-    pub srr_folder: String,
 }
 
 impl Default for DisplayConfig {
@@ -291,7 +286,6 @@ impl Default for DisplayConfig {
             hdr_check: true,
             internal: true,
             external: true,
-            srr_folder: String::new(),
         }
     }
 }

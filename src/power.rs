@@ -6,9 +6,8 @@
 //! and it asks before touching anything that would change what the user sees -
 //! unless the configuration says to just do it.
 //!
-//! Per-monitor target modes can be imported from that tool's runtime folder
-//! (`SRR/config.json`); without it the targets are derived from what the panel
-//! reports as available at the current resolution.
+//! Targets are not configured per monitor: each one is derived from the modes
+//! the display itself reports as available at the current resolution.
 //!
 //! Everything runs on one thread that blocks on a channel, so the tool costs
 //! nothing while the power state does not change.

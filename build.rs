@@ -83,7 +83,7 @@ fn assets_dir() -> PathBuf {
 }
 
 /// The package version in the two shapes a version resource needs:
-/// `0,2,7,0` for `FILEVERSION` and `"0.2.7.0\0"` for the string block.
+/// `0,2,8,0` for `FILEVERSION` and `"0.2.8.0\0"` for the string block.
 fn version_defines() -> (String, String) {
     let version = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".to_string());
 
