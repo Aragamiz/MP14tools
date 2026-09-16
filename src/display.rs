@@ -138,7 +138,6 @@ pub fn rate_at_most(adapter: &str, width: u32, height: u32, limit: u32) -> Optio
 }
 
 /// Highest rate the adapter offers at `width`×`height`.
-#[allow(dead_code)]
 pub fn highest_rate(adapter: &str, width: u32, height: u32) -> Option<u32> {
     frequencies(adapter, width, height).into_iter().max()
 }

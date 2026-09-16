@@ -2,8 +2,9 @@
 //!
 //! A layered, click-through, non-activating window: it never takes focus and
 //! never intercepts clicks. Rounded corners come from a window region, and the
-//! fade-out is a short alpha ramp driven by `WM_TIMER` so the window is only
-//! alive while something is on screen.
+//! whole lifetime - the hold and the fade - is driven by a single repeating
+//! `WM_TIMER`, so a banner cannot be left on screen: every tick either keeps it,
+//! dims it, or hides it.
 
 use std::sync::{Mutex, OnceLock};
 
@@ -24,10 +25,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
-const TIMER_HOLD: usize = 0x4D01;
-const TIMER_FADE: usize = 0x4D02;
-const FADE_STEP_MS: u32 = 40;
-const FADE_STEP_ALPHA: u8 = 48;
+/// Repeating tick that drives both the hold and the fade. One timer for the
+/// whole lifetime of a banner: there is no state in which the window is on
+/// screen without a tick pending.
+const TIMER_TICK: usize = 0x4D01;
+/// Resolution of the countdown; [`FADE_MS`] is a multiple of it.
+const TICK_MS: u32 = 40;
+/// How long the banner takes to fade from fully opaque to invisible.
+const FADE_MS: u32 = 2_000;
 
 fn background() -> COLORREF {
     COLORREF(0x0026_2626)
@@ -37,20 +42,17 @@ fn foreground() -> COLORREF {
     COLORREF(0x00F5_F5F5)
 }
 
-#[derive(PartialEq)]
-enum Stage {
-    Hidden,
-    Holding,
-    Fading,
-}
-
 struct Osd {
     window: HWND,
     font: windows::Win32::Graphics::Gdi::HFONT,
     brush: windows::Win32::Graphics::Gdi::HBRUSH,
     text: String,
     alpha: u8,
-    stage: Stage,
+    /// Milliseconds since the current banner appeared.
+    elapsed_ms: u32,
+    /// Hold time of the current banner, before the fade starts.
+    hold_ms: u32,
+    visible: bool,
 }
 
 // Safety: the OSD window and its GDI objects are only ever touched from the
@@ -65,7 +67,8 @@ fn state() -> &'static Mutex<Option<Osd>> {
     OSD.get_or_init(|| Mutex::new(None))
 }
 
-/// Show `text` as a banner. Must be called from the thread that owns the tray
+/// Show `text` as a banner for `duration_ms`, then fade it out over
+/// [`FADE_MS`] and hide it. Must be called from the thread that owns the tray
 /// window, because the OSD window and its GDI objects live on that thread.
 pub fn show(text: &str, duration_ms: u32) {
     let mut guard = match state().lock() {
@@ -107,7 +110,9 @@ pub fn show(text: &str, duration_ms: u32) {
 
     osd.text = text.to_string();
     osd.alpha = 255;
-    osd.stage = Stage::Holding;
+    osd.elapsed_ms = 0;
+    osd.hold_ms = duration_ms.max(TICK_MS);
+    osd.visible = true;
 
     unsafe {
         let _ = SetWindowPos(
@@ -127,7 +132,9 @@ pub fn show(text: &str, duration_ms: u32) {
         let _ = SetLayeredWindowAttributes(osd.window, COLORREF(0), 255, LWA_ALPHA);
         let _ = ShowWindow(osd.window, SW_SHOWNOACTIVATE);
         let _ = InvalidateRect(Some(osd.window), None, true);
-        SetTimer(Some(osd.window), TIMER_HOLD, duration_ms.max(200), None);
+        // Re-arming the tick restarts the hold, and a banner that was already
+        // fading turns opaque again.
+        SetTimer(Some(osd.window), TIMER_TICK, TICK_MS, None);
     }
 }
 
@@ -199,7 +206,9 @@ fn create() -> Option<Osd> {
             brush: CreateSolidBrush(background()),
             text: String::new(),
             alpha: 255,
-            stage: Stage::Hidden,
+            elapsed_ms: 0,
+            hold_ms: crate::config::OSD_HOLD_DEFAULT_MS,
+            visible: false,
         })
     }
 }
@@ -255,6 +264,10 @@ unsafe fn paint(window: HWND) {
 }
 
 unsafe fn on_timer(identifier: usize) {
+    if identifier != TIMER_TICK {
+        return;
+    }
+
     let Ok(mut guard) = state().lock() else {
         return;
     };
@@ -262,23 +275,35 @@ unsafe fn on_timer(identifier: usize) {
         return;
     };
 
-    match identifier {
-        TIMER_HOLD => {
-            let _ = KillTimer(Some(osd.window), TIMER_HOLD);
-            osd.stage = Stage::Fading;
-            SetTimer(Some(osd.window), TIMER_FADE, FADE_STEP_MS, None);
-        }
-        TIMER_FADE => {
-            osd.alpha = osd.alpha.saturating_sub(FADE_STEP_ALPHA);
-            if osd.alpha == 0 {
-                let _ = KillTimer(Some(osd.window), TIMER_FADE);
-                let _ = ShowWindow(osd.window, SW_HIDE);
-                osd.stage = Stage::Hidden;
-            } else {
-                let _ = SetLayeredWindowAttributes(osd.window, COLORREF(0), osd.alpha, LWA_ALPHA);
-            }
-        }
-        _ => {}
+    // A banner that is no longer visible must not keep the timer alive.
+    if !osd.visible {
+        let _ = KillTimer(Some(osd.window), TIMER_TICK);
+        return;
+    }
+
+    osd.elapsed_ms = osd.elapsed_ms.saturating_add(TICK_MS);
+    if osd.elapsed_ms < osd.hold_ms {
+        return;
+    }
+
+    // Past the hold time the remaining milliseconds map straight onto alpha, so
+    // the fade takes exactly FADE_MS from opaque to invisible.
+    let faded = osd.elapsed_ms - osd.hold_ms;
+    let alpha = if faded >= FADE_MS {
+        0
+    } else {
+        ((FADE_MS - faded) * u32::from(u8::MAX) / FADE_MS) as u8
+    };
+
+    if alpha == 0 {
+        let _ = KillTimer(Some(osd.window), TIMER_TICK);
+        let _ = SetLayeredWindowAttributes(osd.window, COLORREF(0), 0, LWA_ALPHA);
+        let _ = ShowWindow(osd.window, SW_HIDE);
+        osd.alpha = 0;
+        osd.visible = false;
+    } else {
+        osd.alpha = alpha;
+        let _ = SetLayeredWindowAttributes(osd.window, COLORREF(0), alpha, LWA_ALPHA);
     }
 }
 

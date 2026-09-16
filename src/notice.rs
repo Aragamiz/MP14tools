@@ -26,7 +26,7 @@ use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateFontW, CreateRoundRectRgn, CreateSolidBrush, DeleteObject, DrawTextW,
     EndPaint, FillRect, InvalidateRect, RoundRect, SelectObject, SetBkMode, SetTextColor,
     SetWindowRgn, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH,
-    DT_CENTER, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, FW_NORMAL, FW_SEMIBOLD, HGDIOBJ,
+    DT_CENTER, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, FW_NORMAL, FW_SEMIBOLD, HGDIOBJ,
     OUT_DEFAULT_PRECIS, TRANSPARENT,
 };
 use windows::Win32::UI::HiDpi::GetDpiForSystem;
@@ -465,7 +465,7 @@ fn paint(window: HWND) {
             device,
             &mut text,
             &mut text_rect,
-            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
+            DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
         );
         SelectObject(device, old);
 

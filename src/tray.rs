@@ -255,7 +255,7 @@ fn show_pending_osd() {
         .config
         .read()
         .map(|config| config.osd.duration_ms)
-        .unwrap_or(900);
+        .unwrap_or(crate::config::OSD_HOLD_DEFAULT_MS);
     crate::osd::show(&text, duration);
 }
 

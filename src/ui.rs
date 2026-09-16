@@ -18,7 +18,7 @@ use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWINDOWATTRIBUTE};
 use windows::Win32::UI::WindowsAndMessaging::FindWindowW;
 
 use crate::catalog;
-use crate::config::{self, Action, BatteryAction, Config, HapticsConfig};
+use crate::config::{self, Action, BatteryAction, Config, ExternalRate, HapticsConfig};
 use crate::state::Shared;
 
 const WINDOW_TITLE: &str = "MP14Tools";
@@ -462,7 +462,7 @@ impl SettingsApp {
     fn display_tab(&mut self, ui: &mut egui::Ui) {
         ui.heading("显示");
         ui.label(
-            egui::RichText::new("电池供电时把刷新率降到更低的一档，并检查 HDR。")
+            egui::RichText::new("电池供电时把内屏与外屏切到各自设定的档位，并检查内屏 HDR。")
                 .size(12.5)
                 .weak(),
         );
@@ -505,21 +505,48 @@ impl SettingsApp {
             });
 
             ui.add_space(10.0);
-            let mut rate = display.battery_refresh_rate as i32;
-            if ui
-                .add(
-                    egui::Slider::new(&mut rate, 24..=240)
-                        .step_by(1.0)
-                        .text("电池模式目标刷新率 (Hz)"),
-                )
-                .changed()
-            {
-                display.battery_refresh_rate = rate.max(24) as u32;
-                changed = true;
-            }
+            ui.horizontal(|ui| {
+                ui.label("内屏档位：");
+                for rate in crate::config::INTERNAL_RATES {
+                    let selected = display.internal_refresh_rate == rate;
+                    if ui
+                        .selectable_label(selected, format!("{rate} Hz"))
+                        .on_hover_text("电池供电时把内屏切到这个档位")
+                        .clicked()
+                        && !selected
+                    {
+                        display.internal_refresh_rate = rate;
+                        changed = true;
+                    }
+                }
+            });
+
+            ui.horizontal(|ui| {
+                ui.label("外屏档位：");
+                for (target, label, hint) in [
+                    (
+                        ExternalRate::Highest,
+                        "最高档",
+                        "电池供电时让外屏跑在它的最高可用档",
+                    ),
+                    (ExternalRate::Hz60, "60 Hz", "电池供电时把外屏切到 60 Hz"),
+                ] {
+                    let selected = display.external_refresh_rate == target;
+                    if ui
+                        .selectable_label(selected, label)
+                        .on_hover_text(hint)
+                        .clicked()
+                        && !selected
+                    {
+                        display.external_refresh_rate = target;
+                        changed = true;
+                    }
+                }
+            });
+
             ui.label(
                 egui::RichText::new(
-                    "取该值以下最高的可用档位：填 60 就切到 60 Hz；面板若没有这一档则退到最低档。\
+                    "切换时取不高于所选档位的最高可用档；面板若没有这一档则退到最低档。\
                      插回电源时恢复切换前的档位。",
                 )
                 .size(11.5)
@@ -533,12 +560,12 @@ impl SettingsApp {
             changed |= ui
                 .checkbox(
                     &mut display.hdr_check,
-                    "电池模式下检测 HDR，并提供「关闭 HDR」按钮",
+                    "电池模式下检测内屏 HDR，并提供「关闭 HDR」按钮",
                 )
                 .changed();
             ui.label(
                 egui::RichText::new(
-                    "切换刷新率的提示会直接带上这个按钮；另外每次从睡眠唤醒（电池供电时）也会检查一次并弹出提示。",
+                    "只针对内屏。切换刷新率的提示会直接带上这个按钮；另外每次从睡眠唤醒（电池供电时）也会检查一次并弹出提示。",
                 )
                 .size(11.5)
                 .weak(),
@@ -555,9 +582,11 @@ impl SettingsApp {
                 .checkbox(&mut display.external, "外屏（外接显示器）")
                 .changed();
             ui.label(
-                egui::RichText::new("没有勾选的那一类屏幕不会被切换刷新率，也不会被关闭 HDR。")
-                    .size(11.5)
-                    .weak(),
+                egui::RichText::new(
+                    "没有勾选的那一类屏幕不会被切换刷新率；HDR 只针对内屏。",
+                )
+                .size(11.5)
+                .weak(),
             );
         });
 
@@ -785,10 +814,18 @@ impl SettingsApp {
             if self.working.osd.enabled {
                 let mut duration = self.working.osd.duration_ms as i32;
                 if ui
-                    .add(egui::Slider::new(&mut duration, 300..=5000).text("提示显示时长 (ms)"))
+                    .add(
+                        egui::Slider::new(
+                            &mut duration,
+                            config::OSD_HOLD_RANGE.0 as i32..=config::OSD_HOLD_RANGE.1 as i32,
+                        )
+                        .step_by(500.0)
+                        .text("OSD 停留时长 (ms)，之后 2 秒淡出"),
+                    )
                     .changed()
                 {
-                    self.working.osd.duration_ms = duration.max(300) as u32;
+                    self.working.osd.duration_ms =
+                        (duration as u32).clamp(config::OSD_HOLD_RANGE.0, config::OSD_HOLD_RANGE.1);
                     changed = true;
                 }
             }

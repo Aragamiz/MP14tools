@@ -18,7 +18,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use crate::config::{BatteryAction, DisplayConfig};
+use crate::config::{BatteryAction, DisplayConfig, ExternalRate};
 use crate::display::Display;
 use crate::notice::{self, Choice, Notice};
 use crate::state::Shared;
@@ -140,7 +140,7 @@ fn worker(shared: Arc<Shared>, receiver: Receiver<Event>) {
 /// One step a notice can offer.
 #[derive(Clone, Copy)]
 enum Step {
-    LowerRate,
+    SwitchRate,
     UndoRate,
     DisableHdr,
 }
@@ -200,6 +200,59 @@ fn targets(config: &DisplayConfig) -> Vec<Display> {
         .collect()
 }
 
+/// Mode a display is switched to on battery, or `None` when the configuration
+/// asks for something this display cannot report.
+///
+/// The built-in panel has exactly two modes to choose from (60 or 120 Hz) and
+/// lands on the highest one not above the choice; an external display is either
+/// driven at its highest mode or at 60 Hz.
+fn target_rate(config: &DisplayConfig, display: &Display) -> Option<u32> {
+    if display.internal {
+        crate::display::rate_at_most(
+            &display.adapter,
+            display.width,
+            display.height,
+            config.internal_refresh_rate,
+        )
+    } else {
+        match config.external_refresh_rate {
+            ExternalRate::Highest => {
+                crate::display::highest_rate(&display.adapter, display.width, display.height)
+            }
+            ExternalRate::Hz60 => {
+                crate::display::rate_at_most(&display.adapter, display.width, display.height, 60)
+            }
+        }
+    }
+}
+
+/// Displays whose HDR should be offered for switching off.
+///
+/// HDR is only handled for the built-in panel: it is the display that actually
+/// drains the battery, and turning it off there is the whole point of the check.
+fn hdr_candidates(config: &DisplayConfig, displays: &[Display]) -> Vec<Display> {
+    if !config.hdr_check {
+        return Vec::new();
+    }
+
+    displays
+        .iter()
+        .filter(|display| display.internal && display.hdr_supported && display.hdr_enabled)
+        .cloned()
+        .collect()
+}
+
+/// Button label for the rate step: name the rate when every display ends up on
+/// the same one, and stay generic when they do not.
+fn switch_label(plan: &[(Display, u32)]) -> String {
+    match plan.first() {
+        Some((_, first)) if plan.iter().all(|(_, target)| target == first) => {
+            format!("切换到 {first} Hz")
+        }
+        _ => "切换刷新率".to_string(),
+    }
+}
+
 /// AC came back: put every rate this tool lowered back where it was.
 fn restore(shared: &Arc<Shared>, config: &DisplayConfig) {
     let pending: Vec<(String, u32)> = match remembered().lock() {
@@ -235,33 +288,20 @@ fn restore(shared: &Arc<Shared>, config: &DisplayConfig) {
 
 /// Battery, from a power change or a manual check.
 fn enter_battery(shared: &Arc<Shared>, config: &DisplayConfig, displays: &[Display]) {
-    let hdr_displays: Vec<Display> = if config.hdr_check {
-        displays
-            .iter()
-            .filter(|display| display.hdr_supported && display.hdr_enabled)
-            .cloned()
-            .collect()
-    } else {
-        Vec::new()
-    };
+    let hdr_displays = hdr_candidates(config, displays);
 
-    // Which displays can actually be lowered, and to what.
+    // Displays that are not already on the mode the configuration asks for.
     let plan: Vec<(Display, u32)> = displays
         .iter()
         .filter_map(|display| {
-            let target = crate::display::rate_at_most(
-                &display.adapter,
-                display.width,
-                display.height,
-                config.battery_refresh_rate,
-            )?;
-            (display.refresh > target).then(|| (display.clone(), target))
+            let target = target_rate(config, display)?;
+            (display.refresh != target).then(|| (display.clone(), target))
         })
         .collect();
 
     if plan.is_empty() && hdr_displays.is_empty() {
         crate::log::line("display: battery, nothing to do");
-        shared.set_display_status("已是省电档，无需调整".to_string());
+        shared.set_display_status("已是设定档位，无需调整".to_string());
         return;
     }
 
@@ -269,7 +309,7 @@ fn enter_battery(shared: &Arc<Shared>, config: &DisplayConfig, displays: &[Displ
     match config.battery_action {
         BatteryAction::Force => {
             for (display, target) in &plan {
-                if let Err(error) = lower(shared, display, *target) {
+                if let Err(error) = apply_rate(shared, display, *target) {
                     crate::log::line(&format!("display: {error}"));
                 }
             }
@@ -278,8 +318,8 @@ fn enter_battery(shared: &Arc<Shared>, config: &DisplayConfig, displays: &[Displ
             }
         }
         BatteryAction::Notify => {
-            if let Some((_, target)) = plan.first() {
-                steps.push((format!("切换到 {target} Hz"), Step::LowerRate));
+            if !plan.is_empty() {
+                steps.push((switch_label(&plan), Step::SwitchRate));
             }
         }
         BatteryAction::Off => return,
@@ -305,9 +345,9 @@ fn enter_battery(shared: &Arc<Shared>, config: &DisplayConfig, displays: &[Displ
     };
 
     match chosen {
-        Some(Step::LowerRate) => {
+        Some(Step::SwitchRate) => {
             for (display, target) in &plan {
-                if let Err(error) = lower(shared, display, *target) {
+                if let Err(error) = apply_rate(shared, display, *target) {
                     crate::log::line(&format!("display: {error}"));
                 }
             }
@@ -320,15 +360,7 @@ fn enter_battery(shared: &Arc<Shared>, config: &DisplayConfig, displays: &[Displ
 
 /// Wake-up in battery mode: offer to turn HDR off again.
 fn check_hdr(shared: &Arc<Shared>, config: &DisplayConfig, displays: &[Display]) {
-    if !config.hdr_check {
-        return;
-    }
-
-    let hdr_displays: Vec<Display> = displays
-        .iter()
-        .filter(|display| display.hdr_supported && display.hdr_enabled)
-        .cloned()
-        .collect();
+    let hdr_displays = hdr_candidates(config, displays);
 
     if hdr_displays.is_empty() {
         return;
@@ -350,7 +382,7 @@ fn check_hdr(shared: &Arc<Shared>, config: &DisplayConfig, displays: &[Display])
         .join("、");
 
     let notice = Notice::new(
-        format!("电池供电时 HDR 已开启（{names}）。关闭它可以明显省电。"),
+        format!("电池供电时内屏 HDR 已开启（{names}）。关闭它可以明显省电。"),
         "关闭 HDR",
     );
 
@@ -359,8 +391,8 @@ fn check_hdr(shared: &Arc<Shared>, config: &DisplayConfig, displays: &[Display])
     }
 }
 
-/// Lower one display, remembering what it was.
-fn lower(shared: &Arc<Shared>, display: &Display, target: u32) -> Result<(), String> {
+/// Switch one display to `target`, remembering where it was.
+fn apply_rate(shared: &Arc<Shared>, display: &Display, target: u32) -> Result<(), String> {
     let previous = crate::display::current_rate(&display.adapter).unwrap_or(display.refresh);
 
     crate::display::set_rate(&display.adapter, target)?;
@@ -370,10 +402,10 @@ fn lower(shared: &Arc<Shared>, display: &Display, target: u32) -> Result<(), Str
     }
 
     crate::log::line(&format!(
-        "display: {} lowered {previous} -> {target} Hz",
+        "display: {} switched {previous} -> {target} Hz",
         display.adapter
     ));
-    shared.set_display_status(format!("{} → {target} Hz", display.adapter));
+    shared.set_display_status(format!("{} {previous} → {target} Hz", display.adapter));
     crate::display::invalidate();
     Ok(())
 }
@@ -396,17 +428,21 @@ fn turn_off_hdr(shared: &Arc<Shared>, displays: &[Display]) {
 fn describe(plan: &[(Display, u32)], hdr: &[Display]) -> String {
     let mut text = String::from("已切换到电池供电。");
 
-    if let Some((display, target)) = plan.first() {
+    if plan.is_empty() {
+        text.push_str("刷新率已是设定档位。");
+    }
+    for (display, target) in plan {
         text.push_str(&format!(
-            "{} 当前 {} Hz，可降到 {target} Hz。",
-            display.label, display.refresh
+            "{}{} {} Hz → {} Hz。",
+            if display.internal { "内屏 " } else { "外屏 " },
+            display.label,
+            display.refresh,
+            target
         ));
-    } else {
-        text.push_str("刷新率已是省电档。");
     }
 
     if !hdr.is_empty() {
-        text.push_str(" 另外 HDR 正在开启。");
+        text.push_str(" 另外内屏 HDR 正在开启。");
     }
 
     text

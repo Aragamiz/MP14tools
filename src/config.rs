@@ -230,6 +230,30 @@ pub enum BatteryAction {
     Force,
 }
 
+/// Target of an externally connected display while on battery.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ExternalRate {
+    /// Set the display to the highest mode it offers at the current resolution.
+    #[serde(rename = "highest")]
+    Highest,
+    /// Set the display to 60 Hz.
+    #[default]
+    #[serde(rename = "60hz")]
+    Hz60,
+}
+
+/// The two modes the built-in panel is offered as a battery target.
+pub const INTERNAL_RATES: [u32; 2] = [60, 120];
+
+/// Snap a hand-edited value onto the two rates the panel is offered at.
+pub fn nearest_internal_rate(value: u32) -> u32 {
+    if value <= INTERNAL_RATES[0] + 30 {
+        INTERNAL_RATES[0]
+    } else {
+        INTERNAL_RATES[1]
+    }
+}
+
 /// Battery refresh-rate switching and HDR checks (the "smart refresh rate"
 /// behaviour of the reference machine's own tool, reimplemented here).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -239,9 +263,12 @@ pub struct DisplayConfig {
     pub enabled: bool,
     /// What to do on the AC -> battery transition.
     pub battery_action: BatteryAction,
-    /// Highest refresh rate considered "powersave" when on battery.
-    pub battery_refresh_rate: u32,
-    /// Watch HDR and offer to turn it off while on battery.
+    /// Mode the built-in panel is switched to on battery: 60 or 120 Hz. The
+    /// closest available mode not above it is used.
+    pub internal_refresh_rate: u32,
+    /// Mode externally connected displays are switched to on battery.
+    pub external_refresh_rate: ExternalRate,
+    /// Watch the built-in panel's HDR and offer to turn it off while on battery.
     pub hdr_check: bool,
     /// The built-in panel takes part.
     pub internal: bool,
@@ -259,7 +286,8 @@ impl Default for DisplayConfig {
         Self {
             enabled: false,
             battery_action: BatteryAction::Notify,
-            battery_refresh_rate: 60,
+            internal_refresh_rate: INTERNAL_RATES[0],
+            external_refresh_rate: ExternalRate::Hz60,
             hdr_check: true,
             internal: true,
             external: true,
@@ -269,10 +297,9 @@ impl Default for DisplayConfig {
 }
 
 impl DisplayConfig {
-    /// Keep the requested refresh rate inside the range a panel can plausibly
-    /// have, so a hand-edited file cannot ask for 0 Hz.
+    /// Keep a hand-edited file on the modes the panel is actually offered at.
     pub fn normalize(&mut self) {
-        self.battery_refresh_rate = self.battery_refresh_rate.clamp(24, 240);
+        self.internal_refresh_rate = nearest_internal_rate(self.internal_refresh_rate);
     }
 }
 
@@ -323,6 +350,8 @@ pub fn normalize_hex(value: &str) -> String {
 #[serde(default)]
 pub struct OsdConfig {
     pub enabled: bool,
+    /// How long the banner stays fully opaque. The fade-out that follows is a
+    /// fixed two seconds and is not configurable.
     pub duration_ms: u32,
 }
 
@@ -330,8 +359,23 @@ impl Default for OsdConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            duration_ms: 900,
+            duration_ms: OSD_HOLD_DEFAULT_MS,
         }
+    }
+}
+
+/// Time the banner stays fully opaque before it starts fading.
+pub const OSD_HOLD_DEFAULT_MS: u32 = 5_000;
+/// Shortest and longest hold time a hand-edited file may ask for.
+pub const OSD_HOLD_RANGE: (u32, u32) = (1_000, 60_000);
+
+impl OsdConfig {
+    /// Keep the hold time in a range that cannot leave a banner on screen
+    /// forever.
+    pub fn normalize(&mut self) {
+        self.duration_ms = self
+            .duration_ms
+            .clamp(OSD_HOLD_RANGE.0, OSD_HOLD_RANGE.1);
     }
 }
 
@@ -373,6 +417,7 @@ impl Config {
     /// Runs after every load - from disk at startup and from the file watcher -
     /// so a hand-edited file can never push a threshold out of bounds.
     pub fn normalize(&mut self) {
+        self.osd.normalize();
         self.touchpad.normalize();
         self.haptics.normalize();
         self.display.normalize();
