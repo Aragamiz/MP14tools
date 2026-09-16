@@ -13,6 +13,7 @@
 //! nothing while the power state does not change.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -31,6 +32,9 @@ pub enum Event {
     Resume,
     /// The user pressed "check now" in the settings window.
     Manual,
+    /// The tool just started: run the policy once instead of waiting for a
+    /// power event, so the displays match the configuration right away.
+    Startup,
 }
 
 /// Bursts are common (a resume usually carries a power-status change too), so
@@ -39,14 +43,60 @@ const COALESCE: Duration = Duration::from_millis(400);
 
 static EVENTS: OnceLock<Sender<Event>> = OnceLock::new();
 
-/// Rate each display had before this tool lowered it.
+/// Rate each display had before this tool switched it, so switching the charger
+/// back can put it where the user had it.
 ///
-/// Deliberately in memory only: after a restart there is nothing to restore, and
-/// the registry still holds whatever the user had chosen.
+/// Mirrored to disk because a restart would otherwise lose the only copy, and the
+/// tool would then leave the display on the battery rate for good - which is what
+/// "the refresh-rate switching stopped working" looks like from the outside.
 static REMEMBERED: OnceLock<Mutex<HashMap<String, u32>>> = OnceLock::new();
 
+/// File the mirror lives in, next to `config.json`.
+const STATE_FILE: &str = "display_state.json";
+
 fn remembered() -> &'static Mutex<HashMap<String, u32>> {
-    REMEMBERED.get_or_init(|| Mutex::new(HashMap::new()))
+    REMEMBERED.get_or_init(|| Mutex::new(load_state()))
+}
+
+fn state_path() -> PathBuf {
+    crate::config::data_dir().join(STATE_FILE)
+}
+
+/// Rates of the previous session; a missing or unreadable file means "none".
+fn load_state() -> HashMap<String, u32> {
+    std::fs::read_to_string(state_path())
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+/// Write the mirror; an empty map removes the file so nothing stale survives.
+fn store_state(rates: &HashMap<String, u32>) {
+    let path = state_path();
+
+    let result = if rates.is_empty() {
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.to_string()),
+        }
+    } else {
+        serde_json::to_string_pretty(rates)
+            .map_err(|error| error.to_string())
+            .and_then(|text| {
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                std::fs::write(&path, text).map_err(|error| error.to_string())
+            })
+    };
+
+    if let Err(error) = result {
+        crate::log::line(&format!(
+            "display: could not write {}: {error}",
+            path.display()
+        ));
+    }
 }
 
 /// Start the policy thread.
@@ -65,8 +115,14 @@ pub fn spawn(shared: Arc<Shared>) {
         .name("display".to_string())
         .spawn(move || worker(shared, receiver));
 
-    if let Err(error) = spawned {
-        crate::log::line(&format!("display: thread spawn failed: {error}"));
+    match spawned {
+        Ok(_) => {
+            // Evaluate once without waiting for a power event: a policy that only
+            // reacts to *changes* does nothing at all when the tool is started
+            // while the display is already on the wrong rate.
+            request(Event::Startup);
+        }
+        Err(error) => crate::log::line(&format!("display: thread spawn failed: {error}")),
     }
 }
 
@@ -150,6 +206,10 @@ fn handle(shared: &Arc<Shared>, event: Event) {
         Err(_) => return,
     };
 
+    if event == Event::Startup {
+        crate::log::line("display: checking the configured policy after start");
+    }
+
     if !config.enabled {
         if event == Event::Manual {
             shared.set_display_status("显示调节未启用".to_string());
@@ -166,6 +226,16 @@ fn handle(shared: &Arc<Shared>, event: Event) {
 
     if on_battery == Some(false) {
         restore(shared, &config);
+        return;
+    }
+
+    if on_battery.is_none() {
+        // A desktop or a VM cannot tell the power source apart; there is no
+        // battery state to react to, and guessing one would lower the rate on
+        // every start.
+        if event == Event::Manual {
+            shared.set_display_status("本机没有电池信息，显示调节不适用".to_string());
+        }
         return;
     }
 
@@ -241,6 +311,20 @@ fn hdr_candidates(config: &DisplayConfig, displays: &[Display]) -> Vec<Display> 
         .collect()
 }
 
+/// Current rate and configured target of every display, for the log.
+fn describe_current(config: &DisplayConfig, displays: &[Display]) -> String {
+    displays
+        .iter()
+        .map(|display| {
+            let target = target_rate(config, display)
+                .map(|rate| format!("{rate} Hz"))
+                .unwrap_or_else(|| "no mode this panel reports".to_string());
+            format!("{} {} Hz -> {target}", display.adapter, display.refresh)
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Button label for the rate step: name the rate when every display ends up on
 /// the same one, and stay generic when they do not.
 fn switch_label(plan: &[(Display, u32)]) -> String {
@@ -255,11 +339,19 @@ fn switch_label(plan: &[(Display, u32)]) -> String {
 /// AC came back: put every rate this tool lowered back where it was.
 fn restore(shared: &Arc<Shared>, config: &DisplayConfig) {
     let pending: Vec<(String, u32)> = match remembered().lock() {
-        Ok(mut remembered) => remembered.drain().collect(),
+        Ok(mut remembered) => {
+            let drained: Vec<(String, u32)> = remembered.drain().collect();
+            // Persist the emptied map before touching any display: if the tool
+            // dies halfway through, there is nothing left to replay.
+            store_state(&remembered);
+            drained
+        }
         Err(_) => return,
     };
 
     if pending.is_empty() {
+        crate::log::line("display: on AC, no previous rate to restore");
+        shared.set_display_status("交流供电：没有需要恢复的档位".to_string());
         return;
     }
 
@@ -299,7 +391,12 @@ fn enter_battery(shared: &Arc<Shared>, config: &DisplayConfig, displays: &[Displ
         .collect();
 
     if plan.is_empty() && hdr_displays.is_empty() {
-        crate::log::line("display: battery, nothing to do");
+        // Name the rates that were compared: without them "nothing to do" is
+        // impossible to tell apart from a policy that never ran.
+        crate::log::line(&format!(
+            "display: battery, nothing to do ({})",
+            describe_current(config, displays)
+        ));
         shared.set_display_status("已是设定档位，无需调整".to_string());
         return;
     }
@@ -398,6 +495,7 @@ fn apply_rate(shared: &Arc<Shared>, display: &Display, target: u32) -> Result<()
 
     if let Ok(mut remembered) = remembered().lock() {
         remembered.insert(display.adapter.clone(), previous);
+        store_state(&remembered);
     }
 
     crate::log::line(&format!(

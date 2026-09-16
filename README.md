@@ -22,12 +22,12 @@
 | 震动力度调整 | 调整触摸板的**轻触反馈**与**重按反馈**两级力度：范围 `0–128`、步进 `8`，默认即出厂值（80 / 104）。**默认关闭**，不启用时本工具不写触摸板 |
 | OEM 热键映射 | 捕获厂商热键并映射成任意键盘键、鼠标键或组合键；每个热键用「报告前缀」决定匹配哪个键 |
 | 输出动作 | 键盘按键（字母、数字、功能键、媒体键等）、鼠标左/右/中/侧键，均可带 Ctrl / Shift / Alt / Win 修饰键 |
-| 显示调节 | 电池供电时把刷新率切到设定档位：**内屏**可选 60 / 120 Hz，**外屏**可选最高档 / 60 Hz；插回电源恢复原档位。行为可选**不处理 / 通知确认 / 直接切换** |
+| 显示调节 | 电池供电时把刷新率切到设定档位：**内屏**可选 60 / 120 Hz，**外屏**可选最高档 / 60 Hz；插回电源恢复原档位（切换前的档位会存到磁盘，重启后仍然有效）。**程序启动时也会按当前电源状态先执行一次**，不会因为「启动时已经是电池档位」而一直不动。行为可选**不处理 / 通知确认 / 直接切换** |
 | HDR 检测 | **只针对内屏**。切电源与切刷新率时检查，若处于开启状态，通知的第二个按钮提供「关闭 HDR」；电池模式下**每次唤醒**也会检查一次 |
 | 内屏 / 外屏开关 | 两个独立开关，决定显示调节作用于哪些显示器 |
 | 托盘图标 | 打开设置 / 暂停映射 / 命令提示符 / 开机自启 / 退出 |
-| OSD 提示 | 触发时在屏幕底部显示圆角提示条，不抢焦点、不挡点击；停留 5 秒后在 2 秒内淡出消失（停留时长可调） |
-| 通知窗口 | 需要用户决定时弹出的置顶小窗，文字与按钮居中；最多两个按钮，25 秒无操作自动收起 |
+| OSD 提示 | 触发时在屏幕底部显示圆角提示条，不抢焦点、不挡点击；停留 5 秒后在 1 秒内淡出消失（停留时长可调） |
+| 通知窗口 | 需要用户决定时弹出的置顶小窗，文字与按钮居中；略带半透明，动作按钮最多两个，另有常驻的「忽略」按钮可随时关掉；**5 秒无操作后 1 秒淡出收起** |
 | 命令提示符 | 可选：随程序弹出控制台窗口实时显示日志；默认关闭 |
 | 日志位置 | 日志目录可改（带目录选择器），改动立即生效 |
 | 配置热重载 | 直接编辑 `config.json` 保存即生效；配置文件被外部修改时按文件加载且**不覆盖**，并在界面标出 |
@@ -66,7 +66,7 @@
   "show_tray_icon": true,
   "osd": {
     "enabled": true,
-    "duration_ms": 5000            // OSD 停留时长（毫秒），之后 2 秒淡出
+    "duration_ms": 5000            // OSD 停留时长（毫秒），之后 1 秒淡出
   },
   "touchpad": {
     "enabled": true,
@@ -110,6 +110,8 @@
   （外屏跑它的最高可用档）或 `"60hz"`。切换时取不高于该档位的最高可用档，
   插回电源时恢复切换前的档位。
 - 手工改完保存即生效（程序每 1.5 秒比对一次文件内容），越界数值会被自动夹到合法范围。
+- 显示调节会把「切换前的档位」写进同目录的 `display_state.json`，插回电源（含重启后）据此恢复；
+  删掉这个文件只会让下一次插回电源少一次恢复，没有其它影响。
 
 ### 🔨 构建
 
@@ -154,12 +156,18 @@ build.cmd -Release
 
 产物：`build\obj\debug\mp14tools.exe` 或 `build\obj\release\mp14tools.exe`。
 
+> ✅ **已验证**：debug 构建已在另一台 Windows x64 电脑上从零跑通
+> （`.\build.ps1` → `build\obj\debug\mp14tools.exe`），全程不需要管理员权限，
+> 除上面第 1、2 步外没有额外的手工步骤。
+
 ### ⚠️ 已知限制
 
 - OEM 热键前缀默认按参考机型提供，其它机型需要在 `config.json` 里改成自己的前缀；
   只有走系统事件上报的厂商键能作为触发源（不安装全局键盘钩子）。
 - 震动力度**无法读回**：因此「其他软件静默改了硬件力度」检测不到；能检测的是设备不再应答与配置文件被外部修改。
 - 显示调节只做刷新率与 HDR，不改分辨率；HDR 只针对内屏，且需要驱动支持。
+- 显示调节需要机器**报告得出电池状态**：台式机、报告不出电源来源的虚拟机里该功能不适用，
+  程序会在日志里写明并直接跳过，不会去猜一个档位。
 - 外接显示器的可用档位由它自己上报，超出范围的档位不会出现在选择里（外屏只有「最高档 / 60 Hz」两种目标）。
 - OSD 文本使用 Microsoft YaHei UI；缺少该字体的系统上中文会退化为方框。
 - 程序未签名，首次运行可能触发 SmartScreen 提示。
@@ -192,12 +200,12 @@ refresh rate, and it checks the HDR state and prompts about it.
 | Haptic strength | Adjusts the touchpad's **light press feedback** and **deep press feedback** levels: range `0–128`, step `8`, defaults equal the factory values (80 / 104). **Off by default**; while it is off this tool does not write to the touchpad |
 | OEM hotkey mapping | Captures vendor hotkeys and maps them to any keyboard key, mouse button or chord; the "report prefix" of each entry decides which key is matched |
 | Output actions | Keyboard keys (letters, digits, function keys, media keys, …), mouse left/right/middle/side buttons, each optionally with Ctrl / Shift / Alt / Win modifiers |
-| Display policy | On battery the refresh rate is switched to the configured mode: the **internal** panel offers 60 / 120 Hz, an **external** display offers its highest mode / 60 Hz; the previous mode is restored when power is plugged back in. The behaviour can be **off / notify / force** |
+| Display policy | On battery the refresh rate is switched to the configured mode: the **internal** panel offers 60 / 120 Hz, an **external** display offers its highest mode / 60 Hz; the mode from before the switch is restored when power is plugged back in (it is written to disk, so it survives a restart). **The policy also runs once right after start-up**, so a machine that starts on battery does not simply sit on the wrong mode. The behaviour can be **off / notify / force** |
 | HDR check | **Internal panel only.** It is checked when the power source or the refresh rate changes; if HDR is on, the second button of the notification offers "turn HDR off". On battery it is checked once more **on every resume** |
 | Internal / external switches | Two independent switches decide which displays the display policy applies to |
 | Tray icon | Open settings / pause mapping / command prompt / run at logon / exit |
-| OSD | On a trigger it shows a rounded hint bar at the bottom of the screen, without stealing focus or blocking clicks; it stays for 5 seconds and then fades out within 2 seconds (the hold time is configurable) |
-| Notice window | An always-on-top small window shown when the user has to decide something, with the text and buttons centred; at most two buttons, and it collapses itself after 25 seconds without input |
+| OSD | On a trigger it shows a rounded hint bar at the bottom of the screen, without stealing focus or blocking clicks; it stays for 5 seconds and then fades out within 1 second (the hold time is configurable) |
+| Notice window | An always-on-top small window shown when the user has to decide something, with the text and buttons centred; it is slightly translucent, offers at most two action buttons plus an always-present "ignore" button, and **fades out over 1 second after 5 seconds without input** |
 | Command prompt | Optional: a console window showing the log in real time along with the program; off by default |
 | Log location | The log directory can be changed (with a folder picker) and takes effect immediately |
 | Live config reload | Editing `config.json` and saving it applies immediately; when the file is modified externally it is loaded from the file and **not overwritten**, and the UI marks it |
@@ -239,7 +247,7 @@ refresh rate, and it checks the HDR state and prompts about it.
   "show_tray_icon": true,
   "osd": {
     "enabled": true,
-    "duration_ms": 5000            // how long the OSD stays, in milliseconds; then a 2 s fade
+    "duration_ms": 5000            // how long the OSD stays, in milliseconds; then a 1 s fade
   },
   "touchpad": {
     "enabled": true,
@@ -286,6 +294,9 @@ refresh rate, and it checks the HDR state and prompts about it.
   when power is plugged back in.
 - Saving a manual edit applies immediately (the program compares the file content every 1.5 seconds),
   and out-of-range numbers are clamped to the valid range.
+- The display policy writes the mode from before a switch to `display_state.json` next to the
+  configuration, so plugging the charger back in (even after a restart) restores it. Deleting that
+  file only costs one restore, nothing else.
 
 ### 🔨 Build
 
@@ -331,6 +342,10 @@ allow overwriting a running image); add `-KeepRunning` to skip that.
 
 Output: `build\obj\debug\mp14tools.exe` or `build\obj\release\mp14tools.exe`.
 
+> ✅ **Verified**: the debug build has been run through from scratch on another Windows x64 machine
+> (`.\build.ps1` → `build\obj\debug\mp14tools.exe`), with no admin rights and no manual steps
+> beyond steps 1 and 2 above.
+
 ### ⚠️ Known limitations
 
 - The OEM hotkey prefixes are shipped for the reference model; other models need their own prefixes in
@@ -341,6 +356,9 @@ Output: `build\obj\debug\mp14tools.exe` or `build\obj\release\mp14tools.exe`.
   configuration file.
 - The display policy only handles the refresh rate and HDR, not the resolution; HDR is handled for the
   internal panel only, and needs driver support.
+- The display policy needs the machine to **report a battery state**: on a desktop, or in a VM that
+  cannot tell the power source apart, the feature does not apply — the log says so, and no mode is
+  guessed or touched.
 - The modes available on an external display are the ones it reports itself, so modes outside that
   range never appear in the choice (an external display only has the two targets "highest / 60 Hz").
 - OSD text uses Microsoft YaHei UI; on systems without that font Chinese degrades to boxes.

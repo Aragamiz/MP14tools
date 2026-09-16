@@ -793,7 +793,7 @@ impl SettingsApp {
                             config::OSD_HOLD_RANGE.0 as i32..=config::OSD_HOLD_RANGE.1 as i32,
                         )
                         .step_by(500.0)
-                        .text("OSD 停留时长 (ms)，之后 2 秒淡出"),
+                        .text("OSD 停留时长 (ms)，之后 1 秒淡出"),
                     )
                     .changed()
                 {

@@ -32,7 +32,7 @@ const TIMER_TICK: usize = 0x4D01;
 /// Resolution of the countdown; [`FADE_MS`] is a multiple of it.
 const TICK_MS: u32 = 40;
 /// How long the banner takes to fade from fully opaque to invisible.
-const FADE_MS: u32 = 2_000;
+const FADE_MS: u32 = 1_000;
 
 fn background() -> COLORREF {
     COLORREF(0x0026_2626)

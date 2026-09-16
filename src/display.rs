@@ -219,7 +219,7 @@ pub fn set_hdr(display: &Display, enabled: bool) -> Result<(), String> {
     }
 }
 
-/// `Some(true)` on AC, `Some(false)` on battery, `None` when the machine cannot
+/// `Some(true)` on battery, `Some(false)` on AC, `None` when the machine cannot
 /// tell (a desktop, or a VM).
 pub fn on_battery() -> Option<bool> {
     let mut status: SYSTEM_POWER_STATUS = unsafe { zeroed() };

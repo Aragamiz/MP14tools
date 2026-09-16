@@ -14,7 +14,13 @@
 //! * the shell thread calls [`serve`] when it receives the wake-up message.
 //!
 //! Only one notice is ever on screen: a newer one replaces a queued one, so a
-//! burst of power events cannot leave stale questions behind.
+//! burst of power events cannot leave stale questions behind. Next to the answers
+//! the caller configured, every notice carries an "ignore" button, so waiting for
+//! the timeout is never the only way out.
+//!
+//! The window is deliberately slightly translucent - it is an overlay, not a
+//! dialog - and it withdraws itself [`HOLD_MS`] after it appeared unless someone
+//! answers, fading out over [`FADE_MS`] as it goes.
 
 use std::collections::VecDeque;
 use std::sync::mpsc::{self, Sender};
@@ -38,10 +44,24 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
-/// How long a notice waits for an answer before it withdraws itself.
+/// Safety net for [`ask`]: how long it waits for an answer in case the window
+/// cannot be shown at all. A window that is on screen withdraws itself much
+/// earlier - see [`HOLD_MS`].
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(25);
-/// Timer that withdraws the window when nobody answers.
-const TIMER_TIMEOUT: usize = 0x4E01;
+/// Repeating tick that drives the hold and the fade of the window.
+const TIMER_TICK: usize = 0x4E01;
+/// Resolution of the countdown; [`FADE_MS`] is a multiple of it.
+const TICK_MS: u32 = 40;
+/// How long the notice waits for an answer before it starts fading out.
+const HOLD_MS: u32 = 5_000;
+/// Length of the fade-out; the notice answers with `Dismissed` when it ends.
+const FADE_MS: u32 = 1_000;
+/// Alpha while the notice is shown: translucent enough to read as an overlay,
+/// opaque enough that the text and the buttons stay crisp.
+const PEAK_ALPHA: u8 = 204;
+
+/// Button that closes a notice without doing anything.
+const IGNORE_LABEL: &str = "忽略";
 
 const PADDING: f32 = 18.0;
 const BUTTON_HEIGHT: f32 = 30.0;
@@ -104,6 +124,10 @@ struct Panel {
     /// Clickable areas, in client coordinates.
     first_rect: RECT,
     second_rect: Option<RECT>,
+    /// Always present, whatever the caller configured.
+    ignore_rect: RECT,
+    /// Milliseconds since the current notice appeared.
+    elapsed_ms: u32,
     answered: bool,
 }
 
@@ -167,6 +191,7 @@ pub fn serve() {
     panel.answered = false;
     panel.notice = notice;
     panel.reply = reply;
+    panel.elapsed_ms = 0;
 
     layout(panel);
 }
@@ -182,7 +207,7 @@ pub fn dispose() {
 
     let _ = panel.reply.send(Choice::Dismissed);
     unsafe {
-        let _ = KillTimer(Some(panel.window), TIMER_TIMEOUT);
+        let _ = KillTimer(Some(panel.window), TIMER_TICK);
         let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(panel.window);
         let _ = DeleteObject(HGDIOBJ(panel.font_text.0));
         let _ = DeleteObject(HGDIOBJ(panel.font_button.0));
@@ -210,20 +235,32 @@ fn text_width(text: &str, scale: f32) -> f32 {
     units * 7.6 * scale
 }
 
+/// Width a button needs for `label`, padding included.
+fn button_width(label: &str, scale: f32) -> f32 {
+    text_width(label, scale) + 34.0 * scale
+}
+
 /// Size and place the window for the notice it currently holds.
 fn layout(panel: &mut Panel) {
     let scale = dpi_scale();
     let body_width = text_width(&panel.notice.text, scale).min(560.0 * scale);
 
-    let first_width = text_width(&panel.notice.first, scale) + 34.0 * scale;
+    let first_width = button_width(&panel.notice.first, scale);
     let second_width = panel
         .notice
         .second
         .as_ref()
-        .map(|label| text_width(label, scale) + 34.0 * scale)
+        .map(|label| button_width(label, scale))
         .unwrap_or(0.0);
+    let ignore_width = button_width(IGNORE_LABEL, scale);
 
-    let buttons_width = first_width + second_width + if second_width > 0.0 { BUTTON_GAP * scale } else { 0.0 };
+    // The ignore button belongs to every notice, so the row never has fewer than
+    // two buttons.
+    let button_count = if second_width > 0.0 { 3 } else { 2 };
+    let buttons_width = first_width
+        + second_width
+        + ignore_width
+        + (BUTTON_GAP * scale) * (button_count - 1) as f32;
     let width = (body_width.max(buttons_width) + PADDING * 2.0).max(280.0 * scale) as i32;
     let height = (PADDING * 2.0 + TEXT_LINE * scale + 18.0 * scale + BUTTON_HEIGHT * scale) as i32;
 
@@ -242,19 +279,28 @@ fn layout(panel: &mut Panel) {
 
     // Buttons sit centred under the text.
     let button_y = (PADDING * scale + TEXT_LINE * scale + 18.0 * scale) as i32;
-    let start_x = ((width as f32 - buttons_width) / 2.0) as i32;
-    panel.first_rect = RECT {
-        left: start_x,
+    let button_height = (BUTTON_HEIGHT * scale) as i32;
+    let gap = (BUTTON_GAP * scale) as i32;
+    let place = |left: i32, width: f32| RECT {
+        left,
         top: button_y,
-        right: start_x + first_width as i32,
-        bottom: button_y + (BUTTON_HEIGHT * scale) as i32,
+        right: left + width as i32,
+        bottom: button_y + button_height,
     };
-    panel.second_rect = (second_width > 0.0).then(|| RECT {
-        left: start_x + first_width as i32 + (BUTTON_GAP * scale) as i32,
-        top: button_y,
-        right: start_x + first_width as i32 + (BUTTON_GAP * scale) as i32 + second_width as i32,
-        bottom: button_y + (BUTTON_HEIGHT * scale) as i32,
-    });
+
+    let mut left = ((width as f32 - buttons_width) / 2.0) as i32;
+    panel.first_rect = place(left, first_width);
+    left += first_width as i32 + gap;
+
+    panel.second_rect = if second_width > 0.0 {
+        let rect = place(left, second_width);
+        left += second_width as i32 + gap;
+        Some(rect)
+    } else {
+        None
+    };
+
+    panel.ignore_rect = place(left, ignore_width);
 
     unsafe {
         let _ = SetWindowPos(
@@ -278,10 +324,12 @@ fn layout(panel: &mut Panel) {
         );
         SetWindowRgn(panel.window, Some(region), true);
 
-        let _ = SetLayeredWindowAttributes(panel.window, COLORREF(0), 255, LWA_ALPHA);
+        let _ = SetLayeredWindowAttributes(panel.window, COLORREF(0), PEAK_ALPHA, LWA_ALPHA);
         let _ = ShowWindow(panel.window, SW_SHOWNOACTIVATE);
         let _ = InvalidateRect(Some(panel.window), None, true);
-        SetTimer(Some(panel.window), TIMER_TIMEOUT, 25_000, None);
+        // A single repeating tick counts the hold and then the fade; answering
+        // kills it, so no notice can outlive its question.
+        SetTimer(Some(panel.window), TIMER_TICK, TICK_MS, None);
     }
 }
 
@@ -362,8 +410,36 @@ fn create() -> Option<Panel> {
             reply: sender,
             first_rect: RECT::default(),
             second_rect: None,
+            ignore_rect: RECT::default(),
+            elapsed_ms: 0,
             answered: true,
         })
+    }
+}
+
+/// Advance the countdown on the shell thread: hold, then fade, then withdraw
+/// the question unanswered.
+fn on_tick(panel: &mut Panel) {
+    panel.elapsed_ms = panel.elapsed_ms.saturating_add(TICK_MS);
+
+    if panel.elapsed_ms < HOLD_MS {
+        return;
+    }
+
+    let faded = panel.elapsed_ms - HOLD_MS;
+    let alpha = if faded >= FADE_MS {
+        0
+    } else {
+        ((FADE_MS - faded) * u32::from(PEAK_ALPHA) / FADE_MS) as u8
+    };
+
+    if alpha == 0 {
+        answer(panel, Choice::Dismissed);
+        return;
+    }
+
+    unsafe {
+        let _ = SetLayeredWindowAttributes(panel.window, COLORREF(0), alpha, LWA_ALPHA);
     }
 }
 
@@ -375,7 +451,7 @@ fn answer(panel: &mut Panel, choice: Choice) {
     panel.answered = true;
 
     unsafe {
-        let _ = KillTimer(Some(panel.window), TIMER_TIMEOUT);
+        let _ = KillTimer(Some(panel.window), TIMER_TICK);
         let _ = ShowWindow(panel.window, SW_HIDE);
     }
 
@@ -398,16 +474,19 @@ unsafe extern "system" fn window_proc(
                     answer(panel, Choice::First);
                 } else if panel.second_rect.map(|rect| inside(rect, x, y)) == Some(true) {
                     answer(panel, Choice::Second);
+                } else if inside(panel.ignore_rect, x, y) {
+                    // Exactly what the timeout would have done.
+                    answer(panel, Choice::Dismissed);
                 }
             }
         }
         return LRESULT(0);
     }
 
-    if message == WM_TIMER && wparam.0 == TIMER_TIMEOUT {
+    if message == WM_TIMER && wparam.0 == TIMER_TICK {
         if let Ok(mut guard) = panel().lock() {
             if let Some(panel) = guard.as_mut() {
-                answer(panel, Choice::Dismissed);
+                on_tick(panel);
             }
         }
         return LRESULT(0);
@@ -489,6 +568,7 @@ fn paint(window: HWND) {
         if let (Some(rect), Some(label)) = (panel.second_rect, panel.notice.second.clone()) {
             draw_button(rect, &label);
         }
+        draw_button(panel.ignore_rect, IGNORE_LABEL);
         SelectObject(device, old);
     }
 
