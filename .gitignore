@@ -1,0 +1,9 @@
+# Every generated file lives under build\ - see .cargo\config.toml, which points
+# cargo's target directory at build\obj. Deleting build\ removes all of it.
+build/
+
+# Kept so that an older checkout which still has a sibling target\ directory
+# does not start committing binaries.
+target/
+
+*.pdb

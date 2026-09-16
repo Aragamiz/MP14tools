@@ -1,0 +1,9 @@
+# Keep every build artefact inside this project folder instead of a sibling
+# `target` directory, so `mp14tools` stays self-contained:
+# deleting `mp14tools/build` removes 100% of the generated files.
+#
+# `build/obj` holds cargo's target directory (compiled deps, the exe, fingerprints).
+# Paths here are relative to the directory that contains `.cargo`, i.e. mp14tools\.
+
+[build]
+target-dir = "build/obj"

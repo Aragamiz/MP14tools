@@ -1,0 +1,14 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "mp14tools: release build",
+			"type": "shell",
+			"command": "${workspaceFolder}\\mp14tools-main\\build.cmd",
+			"args": [
+				"-Release"
+			],
+			"group": "build"
+		}
+	]
+}
